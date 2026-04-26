@@ -7,6 +7,7 @@ and uses only standard-library asyncio + type hints.
 
 from .director import Director
 from .agent import ObjectAgent
+from .llm import DeterministicJSONLLM, JSONLLM
 from .messages import SceneObjective, Shutdown, Tick
 from .world_state import WorldState
 from .types import ObjectState, Vec2
@@ -14,6 +15,8 @@ from .types import ObjectState, Vec2
 __all__ = [
     "Director",
     "ObjectAgent",
+    "JSONLLM",
+    "DeterministicJSONLLM",
     "SceneObjective",
     "Shutdown",
     "Tick",
@@ -21,4 +24,3 @@ __all__ = [
     "ObjectState",
     "Vec2",
 ]
-

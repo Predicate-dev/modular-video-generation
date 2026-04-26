@@ -4,6 +4,7 @@ import asyncio
 
 from .agent import ObjectAgent
 from .director import Director
+from .llm import DeterministicJSONLLM
 from .messages import Tick, move_to
 from .world_state import WorldState
 
@@ -16,7 +17,12 @@ async def _tick_loop(director: Director, *, dt_s: float, steps: int) -> None:
 
 async def main() -> None:
     world = WorldState()
-    agents = [ObjectAgent("car_1", world=world), ObjectAgent("car_2", world=world)]
+    llm = DeterministicJSONLLM()
+    dt_s = 1 / 24
+    agents = [
+        ObjectAgent("car_1", world=world, llm=llm, dt_s=dt_s),
+        ObjectAgent("car_2", world=world, llm=llm, dt_s=dt_s),
+    ]
     director = Director(agents=agents)
 
     async with asyncio.TaskGroup() as tg:
@@ -26,7 +32,7 @@ async def main() -> None:
         await director.broadcast(move_to("obj-1", target=(10.0, 0.0), speed=2.0, target_ids=("car_1",)))
         await director.broadcast(move_to("obj-2", target=(0.0, 5.0), speed=1.0, target_ids=("car_2",)))
 
-        await _tick_loop(director, dt_s=0.05, steps=60)
+        await _tick_loop(director, dt_s=dt_s, steps=24)
         snap = await world.snapshot()
         print("World snapshot:", snap)
 
@@ -36,4 +42,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
