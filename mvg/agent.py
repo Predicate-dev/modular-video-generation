@@ -5,6 +5,7 @@ from collections import deque
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from .events import PlanProduced
 from .messages import AgentMessage, SceneObjective, Shutdown, Tick
 from .planning import (
     PlanParseResult,
@@ -24,6 +25,7 @@ class AgentContext:
     agent_id: str
     world: WorldState
     llm: JSONLLM
+    outbox: asyncio.Queue[PlanProduced] | None = None
     active_objective: SceneObjective | None = None
     cache: deque[ObjectState] | None = None
     planned: deque[ObjectState] | None = None
@@ -32,6 +34,7 @@ class AgentContext:
     frames_per_objective: int = 24
     max_speed: float = 25.0
     max_accel: float = 100.0
+    apply_world_updates: bool = True
 
 
 class _IdleState:
@@ -84,6 +87,13 @@ class _ActingState:
             return None
 
         if isinstance(msg, Tick):
+            if not ctx.apply_world_updates:
+                # Planner-only mode: keep cache in sync with authoritative world state.
+                obj = await ctx.world.get(ctx.agent_id)
+                if obj is not None and ctx.cache is not None:
+                    ctx.cache.append(obj)
+                return None
+
             if ctx.planned is None or ctx.cache is None:
                 return "idle"
 
@@ -145,23 +155,27 @@ class ObjectAgent:
         dt_s: float = 1 / 24,
         max_speed: float = 25.0,
         max_accel: float = 100.0,
+        apply_world_updates: bool = True,
     ) -> None:
         self.agent_id = agent_id
         self.world = world
         self.llm = llm
         self.inbox: asyncio.Queue[AgentMessage] = asyncio.Queue(maxsize=queue_size)
+        self.outbox: asyncio.Queue[PlanProduced] = asyncio.Queue()
         self._cache: deque[ObjectState] = deque(maxlen=cache_size)
         self._planned: deque[ObjectState] = deque()
         self._ctx = AgentContext(
             agent_id=agent_id,
             world=world,
             llm=llm,
+            outbox=self.outbox,
             cache=self._cache,
             planned=self._planned,
             dt_s=dt_s,
             frames_per_objective=frames_per_objective,
             max_speed=max_speed,
             max_accel=max_accel,
+            apply_world_updates=apply_world_updates,
         )
         self._sm = AsyncStateMachine[AgentContext, AgentMessage](
             states={"idle": _IdleState(), "acting": _ActingState(), "stopped": _StoppedState()},
@@ -254,6 +268,9 @@ class ObjectAgent:
         self._planned.clear()
         self._planned.extend(parsed.frames)
         await self.world.update(self.agent_id, current_action="planned")
+        await self.outbox.put(
+            PlanProduced(agent_id=self.agent_id, objective_id=parsed.objective_id, frames=parsed.frames, raw=parsed.raw)
+        )
         return parsed
 
 
@@ -322,3 +339,7 @@ async def _plan_objective(ctx: AgentContext) -> None:
     ctx.planned.clear()
     ctx.planned.extend(parsed.frames)
     await ctx.world.update(ctx.agent_id, current_action="planned")
+    if ctx.outbox is not None:
+        await ctx.outbox.put(
+            PlanProduced(agent_id=ctx.agent_id, objective_id=parsed.objective_id, frames=parsed.frames, raw=parsed.raw)
+        )

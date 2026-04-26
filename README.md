@@ -14,7 +14,17 @@ python3 -m mvg.demo
 
 ## Blender (Headless) World Executor
 
-`blender/world_executor.py` reads a per-frame WorldState buffer (JSONL or JSON), applies object transforms, renders G-buffer passes, and writes them to disk.
+`blender/world_executor.py` reads a per-frame WorldState buffer (JSONL or JSON), applies object transforms, and renders a visible headless frame sequence.
+
+If a compositor tree is available, it also writes technical passes; otherwise it falls back to RGB frames so the demo still produces visible output.
+
+## Integrated Demo: Agents → Director → Physics → WorldState Buffer
+
+This produces a `world.jsonl` buffer (one frame per line) that you can feed into the Blender executor.
+
+```bash
+python3 -m mvg.demo_pipeline --out-jsonl /tmp/mvg_world.jsonl --frames 24
+```
 
 Example JSONL (one line per frame):
 
@@ -25,14 +35,14 @@ Example JSONL (one line per frame):
 Run headless:
 
 ```bash
-blender -b scene.blend -P blender/world_executor.py -- \
+blender -b --factory-startup -P blender/world_executor.py -- \
   --worldstate-jsonl /abs/path/world.jsonl \
   --output-dir /abs/path/out \
-  --frame-start 1 --frame-end 240 \
-  --cycles --samples 256
+  --frame-start 0 --frame-end 23
 ```
 
 Outputs:
+- `out/rgb/rgb_####.png` when running without a compositor tree
 - `out/depth/depth_####.exr`
 - `out/normal/normal_####.exr`
 - `out/mask/object_index_####.exr` (object-id segmentation via Blender Object Index pass)

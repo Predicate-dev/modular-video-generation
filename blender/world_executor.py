@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
 import bpy
+from mathutils import Vector
 
 
 def _is_number(x: object) -> bool:
@@ -133,6 +134,72 @@ def find_object_for_id(object_id: str, *, id_prop: str) -> bpy.types.Object | No
     return None
 
 
+def _look_at(obj: bpy.types.Object, target: tuple[float, float, float]) -> None:
+    direction = Vector(target) - obj.location
+    if direction.length_squared == 0:
+        return
+    obj.rotation_euler = direction.to_track_quat("-Z", "Y").to_euler()
+
+
+def ensure_scene_primitives(scene: bpy.types.Scene) -> None:
+    collection = scene.collection
+
+    camera = scene.camera
+    if camera is None:
+        cam_data = bpy.data.cameras.new("MVGCamera")
+        camera = bpy.data.objects.new("MVGCamera", cam_data)
+        collection.objects.link(camera)
+        camera.location = (0.0, -14.0, 9.0)
+        _look_at(camera, (0.0, 0.0, 0.0))
+        scene.camera = camera
+
+    if not any(obj.type == "LIGHT" for obj in scene.objects):
+        light_data = bpy.data.lights.new(name="MVGSun", type="SUN")
+        light = bpy.data.objects.new(name="MVGSun", object_data=light_data)
+        collection.objects.link(light)
+        light.rotation_euler = (math.radians(35.0), 0.0, math.radians(25.0))
+
+
+def ensure_visible_object(
+    *,
+    scene: bpy.types.Scene,
+    object_id: str,
+    id_prop: str,
+    z: float,
+) -> bpy.types.Object:
+    obj = find_object_for_id(object_id, id_prop=id_prop)
+    if obj is not None:
+        return obj
+
+    mesh = bpy.data.meshes.new(f"{object_id}_Mesh")
+    verts = [
+        (-0.5, -0.5, -0.5),
+        (0.5, -0.5, -0.5),
+        (0.5, 0.5, -0.5),
+        (-0.5, 0.5, -0.5),
+        (-0.5, -0.5, 0.5),
+        (0.5, -0.5, 0.5),
+        (0.5, 0.5, 0.5),
+        (-0.5, 0.5, 0.5),
+    ]
+    faces = [
+        (0, 1, 2, 3),
+        (4, 5, 6, 7),
+        (0, 1, 5, 4),
+        (1, 2, 6, 5),
+        (2, 3, 7, 6),
+        (3, 0, 4, 7),
+    ]
+    mesh.from_pydata(verts, [], faces)
+    mesh.update()
+
+    obj = bpy.data.objects.new(object_id, mesh)
+    obj.location = (0.0, 0.0, z)
+    obj["mvg_id"] = object_id
+    scene.collection.objects.link(obj)
+    return obj
+
+
 def ensure_render_passes(view_layer: bpy.types.ViewLayer) -> None:
     view_layer.use_pass_z = True
     view_layer.use_pass_normal = True
@@ -144,12 +211,20 @@ def ensure_output_dirs(output_dir: str, *, per_object_masks: bool) -> dict[str, 
         "depth": os.path.join(output_dir, "depth"),
         "normal": os.path.join(output_dir, "normal"),
         "mask": os.path.join(output_dir, "mask"),
+        "rgb": os.path.join(output_dir, "rgb"),
     }
     if per_object_masks:
         paths["mask_per_object"] = os.path.join(output_dir, "mask_per_object")
     for p in paths.values():
         os.makedirs(p, exist_ok=True)
     return paths
+
+
+def save_rgb_render(scene: bpy.types.Scene, output_path: str) -> None:
+    render_result = bpy.data.images.get("Render Result")
+    if render_result is None:
+        raise RuntimeError("Render Result image not available after rendering")
+    render_result.save_render(filepath=output_path, scene=scene)
 
 
 def configure_compositor(
@@ -161,8 +236,9 @@ def configure_compositor(
     id_to_pass_index: Mapping[str, int],
 ) -> None:
     scene.use_nodes = True
-    tree = scene.node_tree
-    assert tree is not None
+    tree = getattr(scene, "node_tree", None)
+    if tree is None:
+        raise RuntimeError("Scene compositor tree is unavailable in this Blender build")
 
     # Clear existing compositor nodes for deterministic output.
     for node in list(tree.nodes):
@@ -317,6 +393,7 @@ def main() -> None:
 
     scene = bpy.context.scene
     view_layer = bpy.context.view_layer
+    ensure_scene_primitives(scene)
     ensure_render_passes(view_layer)
 
     # Determine frame range.
@@ -327,6 +404,8 @@ def main() -> None:
 
     output_paths = ensure_output_dirs(args.output_dir, per_object_masks=bool(args.per_object_masks))
     set_quality_hard_world(scene, samples=int(args.samples), use_cycles=bool(args.cycles))
+
+    compositor_available = hasattr(scene, "node_tree")
 
     # Buffer source.
     json_frames: dict[int, FrameData] | None = None
@@ -370,13 +449,14 @@ def main() -> None:
         for oid in object_ids:
             ensure_pass_index(oid)
 
-        configure_compositor(
-            scene=scene,
-            output_paths=output_paths,
-            per_object_masks=bool(args.per_object_masks),
-            object_ids=object_ids,
-            id_to_pass_index=id_to_pass_index,
-        )
+        if compositor_available:
+            configure_compositor(
+                scene=scene,
+                output_paths=output_paths,
+                per_object_masks=bool(args.per_object_masks),
+                object_ids=object_ids,
+                id_to_pass_index=id_to_pass_index,
+            )
 
         for frame in range(frame_start, frame_end + 1):
             # Get frame data.
@@ -404,9 +484,7 @@ def main() -> None:
                             id_to_pass_index=id_to_pass_index,
                         )
 
-                obj = find_object_for_id(oid, id_prop=str(args.id_prop))
-                if obj is None:
-                    continue
+                obj = ensure_visible_object(scene=scene, object_id=oid, id_prop=str(args.id_prop), z=float(args.z))
 
                 obj.pass_index = id_to_pass_index[oid]
                 apply_object_state(
@@ -418,6 +496,10 @@ def main() -> None:
 
             scene.frame_set(frame)
             bpy.ops.render.render(write_still=False)
+
+            if not compositor_available:
+                rgb_path = os.path.join(output_paths["rgb"], f"rgb_{frame:04d}.png")
+                save_rgb_render(scene, rgb_path)
     finally:
         if buffer is not None:
             buffer.close()
